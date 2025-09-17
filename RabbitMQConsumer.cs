@@ -289,11 +289,21 @@ namespace RabbitMQService
             _disposed = true;
 
             CleanupChannels();
+
             if (_connection != null)
             {
-                _connection.Close();
-                _connection.Dispose();
+                try
+                {
+                    _connection.ConnectionShutdown -= OnConnectionShutdown;
+                    _connection.Close();
+                }
+                catch { }
+                finally
+                {
+                    _connection.Dispose();
+                }
             }
         }
+
     }
 }
