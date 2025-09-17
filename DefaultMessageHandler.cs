@@ -43,7 +43,7 @@ internal class DefaultMessageHandler : IMessageHandler
             return;
         }
 
-        string sql = @"
+        const string sql = @"
                 INSERT INTO [tb_task_bpm_wait_exec]
                 (
                     task_name,

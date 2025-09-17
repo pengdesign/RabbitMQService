@@ -209,7 +209,6 @@ namespace RabbitMQService
                 }
                 finally
                 {
-                    cts.Cancel();
                     cts.Dispose();
                     sem.Release();
                 }
