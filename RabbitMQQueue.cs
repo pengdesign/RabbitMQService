@@ -10,8 +10,8 @@ namespace RabbitMQService
 {
     public class RabbitMQQueue : IDisposable
     {
-        private readonly Logger logger = LogManager.GetCurrentClassLogger();
-        private RabbitMQConsumer rabbitMqConsumer;
+        private readonly Logger _logger = LogManager.GetCurrentClassLogger();
+        private RabbitMQConsumer _rabbitMqConsumer;
       
         /// <summary>
         /// 获取队列配置（名称+并发数）
@@ -20,10 +20,10 @@ namespace RabbitMQService
         {
             if (string.IsNullOrEmpty(config))
             {
-                logger.Error("SqlServer_Config 配置项未设置");
+                _logger.Error("SqlServer_Config 配置项未设置");
                 return new List<QueueConfig>();
             }
-            logger.Info($"SqlServer_Config: {config}");
+            _logger.Info($"SqlServer_Config: {config}");
 
             const string sql = @"SELECT QueueName, 5 AS MaxConcurrent
                                  FROM dbo.Tb_BPM_QueueSet";
@@ -44,7 +44,7 @@ namespace RabbitMQService
             }
             catch (Exception ex)
             {
-                logger.Error(ex, "获取队列配置异常");
+                _logger.Error(ex, "获取队列配置异常");
                 return new List<QueueConfig>();
             }
         }
@@ -57,28 +57,27 @@ namespace RabbitMQService
                 string hostName = ConfigurationManager.AppSettings["RabbitMQ_HostName"];
                 string userName = ConfigurationManager.AppSettings["RabbitMQ_UserName"];
                 string password = ConfigurationManager.AppSettings["RabbitMQ_Password"];
-
                 var queueConfigs = GetQueueConfigs(config);
                 if (queueConfigs.Count == 0)
                 {
-                    logger.Error("未查询到队列配置");
+                    _logger.Error($"未查询到队列配置");
                     return;
                 }
-                rabbitMqConsumer = new RabbitMQConsumer(
-                    logger,
-                    new DefaultMessageHandler(config, logger),
+                _rabbitMqConsumer = new RabbitMQConsumer(
+                    _logger,
+                    new DefaultMessageHandler(config, _logger),
                     queueConfigs,
                     hostName,
                     userName,
                     password
                 );
 
-                rabbitMqConsumer.Start();
-                logger.Info("服务启动成功...");
+                _rabbitMqConsumer.Start();
+                _logger.Info("服务启动成功...");
             }
             catch (Exception ex)
             {
-                logger.Error(ex, "服务启动异常");
+                _logger.Error(ex, "服务启动异常");
             }
         }
 
@@ -86,13 +85,13 @@ namespace RabbitMQService
         {
             try
             {
-                rabbitMqConsumer?.Dispose();
-                rabbitMqConsumer = null;
-                logger.Info("服务停止成功...");
+                _rabbitMqConsumer?.Dispose();
+                _rabbitMqConsumer = null;
+                _logger.Info("服务停止成功...");
             }
             catch (Exception ex)
             {
-                logger.Error(ex, "服务停止异常");
+                _logger.Error(ex, "服务停止异常");
             }
         }
 

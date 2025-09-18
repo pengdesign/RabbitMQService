@@ -195,7 +195,7 @@ namespace RabbitMQService
                     await _handler.HandleAsync(queueName, message, cts.Token);
 
                     channel.BasicAck(ea.DeliveryTag, false);
-                    _logger.Info($"队列[{queueName}] 消息处理成功, DeliveryTag={ea.DeliveryTag}");
+                    //_logger.Info($"队列[{queueName}] 消息处理成功, DeliveryTag={ea.DeliveryTag}");
                 }
                 catch (OperationCanceledException)
                 {

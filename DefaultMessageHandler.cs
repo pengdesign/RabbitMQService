@@ -10,12 +10,12 @@ using System.Threading.Tasks;
 internal class DefaultMessageHandler : IMessageHandler
 {
     private readonly Logger _logger;
-    private readonly string _connectionString;
+    private readonly string _config;
 
-    public DefaultMessageHandler(string connectionString, Logger logger)
+    public DefaultMessageHandler(string config, Logger logger)
     {
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
-        _connectionString = connectionString ?? throw new ArgumentNullException(nameof(connectionString));
+        _config = config ?? throw new ArgumentNullException(nameof(config));
     }
 
     public async Task HandleAsync(string queueName, string message, CancellationToken token)
@@ -57,7 +57,7 @@ internal class DefaultMessageHandler : IMessageHandler
 
         try
         {
-            using (var connection = new SqlConnection(_connectionString))
+            using (var connection = new SqlConnection(_config))
             {
                 await connection.OpenAsync(token);
                 await connection.ExecuteAsync(sql, new
