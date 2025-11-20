@@ -37,11 +37,11 @@ internal class DefaultMessageHandler : IMessageHandler
             return;
         }
 
-        if (modelMessage == null || string.IsNullOrEmpty(modelMessage.InstanceId))
-        {
-            _logger.Warn($"消息缺少 InstanceId，忽略。队列: {queueName}, 内容: {message}");
-            return;
-        }
+        //if (modelMessage == null || string.IsNullOrEmpty(modelMessage.InstanceId))
+        //{
+        //    _logger.Warn($"消息缺少 InstanceId，忽略。队列: {queueName}, 内容: {message}");
+        //    return;
+        //}
 
         const string sql = @"
                 INSERT INTO [tb_task_bpm_wait_exec]
@@ -49,10 +49,11 @@ internal class DefaultMessageHandler : IMessageHandler
                     task_name,
                     task_id,
                     task_result,
-                    task_is_complete
+                    task_is_complete,
+                    task_message
                 )
                 VALUES
-                (@QueueName, @InstanceId, @BpmType, @TaskIsComplete)
+                (@task_name, @task_id, @task_result, @task_is_complete,@task_message)
         ";
 
         try
@@ -62,10 +63,12 @@ internal class DefaultMessageHandler : IMessageHandler
                 await connection.OpenAsync(token);
                 await connection.ExecuteAsync(sql, new
                 {
-                    QueueName = queueName,
-                    InstanceId = modelMessage.InstanceId,
-                    BpmType = modelMessage.BpmType,
-                    TaskIsComplete = 0
+                    task_name = queueName,
+                    task_id = modelMessage.InstanceId,
+                    task_result = modelMessage.BpmType,
+                    task_is_complete = 0,
+                    task_message = message
+
                 });
             }
             _logger.Info($"消息入库成功: InstanceId={modelMessage.InstanceId}, 队列={queueName}");
