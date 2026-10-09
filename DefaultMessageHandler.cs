@@ -43,16 +43,23 @@ internal class DefaultMessageHandler : IMessageHandler
             return;
         }
 
+        // 幂等写入:MQ 红eliver/超时重试会导致同一 InstanceId 重复投递,
+        // 以 task_id 去重,重复投递视为成功(直接 Ack),避免下游 BPM 重复执行。
+        // 前提:tb_task_bpm_wait_exec.task_id 需有唯一约束/唯一索引:
+        //   CREATE UNIQUE INDEX UX_tb_task_bpm_wait_exec_task_id ON tb_task_bpm_wait_exec(task_id);
         const string sql = @"
-                INSERT INTO [tb_task_bpm_wait_exec]
-                (
-                    task_name,
-                    task_id,
-                    task_result,
-                    task_is_complete
-                )
-                VALUES
-                (@QueueName, @InstanceId, @BpmType, @TaskIsComplete)
+                IF NOT EXISTS (SELECT 1 FROM [tb_task_bpm_wait_exec] WHERE [task_id] = @InstanceId)
+                BEGIN
+                    INSERT INTO [tb_task_bpm_wait_exec]
+                    (
+                        task_name,
+                        task_id,
+                        task_result,
+                        task_is_complete
+                    )
+                    VALUES
+                    (@QueueName, @InstanceId, @BpmType, @TaskIsComplete)
+                END
         ";
 
         try
@@ -60,20 +67,28 @@ internal class DefaultMessageHandler : IMessageHandler
             using (var connection = new SqlConnection(_config))
             {
                 await connection.OpenAsync(token);
-                await connection.ExecuteAsync(sql, new
+                int rows = await connection.ExecuteAsync(sql, new
                 {
                     QueueName = queueName,
                     InstanceId = modelMessage.InstanceId,
                     BpmType = modelMessage.BpmType,
                     TaskIsComplete = 0
                 });
+                if (rows == 0)
+                    _logger.Info($"消息重复投递已去重: InstanceId={modelMessage.InstanceId}, 队列={queueName}");
+                else
+                    _logger.Info($"消息入库成功: InstanceId={modelMessage.InstanceId}, 队列={queueName}");
             }
-            _logger.Info($"消息入库成功: InstanceId={modelMessage.InstanceId}, 队列={queueName}");
         }
         catch (OperationCanceledException)
         {
             _logger.Warn($"消息处理被取消: InstanceId={modelMessage.InstanceId}, 队列={queueName}");
             throw;
+        }
+        catch (SqlException ex) when (ex.Number == 2627 || ex.Number == 2601)
+        {
+            // 唯一索引兜底:高并发下 IF NOT EXISTS 仍可能撞唯一键,视为重复投递成功,保证 Ack 不进死循环
+            _logger.Info($"消息重复投递已去重(唯一键冲突): InstanceId={modelMessage.InstanceId}, 队列={queueName}");
         }
         catch (Exception ex)
         {
