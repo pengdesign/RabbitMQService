@@ -17,6 +17,12 @@ namespace RabbitMQService
     {
         private const int MaxRedeliveries = 5;
         private const string RetryCountHeader = "x-retry-count";
+        // 全队列共享一个死信交换机(名称固定),才能用 RabbitMQ policy 给已存在的老队列补死信配置。
+        // policy 命令(在 MQ 服务器执行一次即可):
+        //   rabbitmqctl set_policy bpm-wait-exec-dlx ".*" '{"dead-letter-exchange":"bpm.wait-exec.dlx"}' --apply-to queues
+        // 或 Management UI -> Admin -> Policies 新增同样内容。死信路由键默认=原路由键(即队列名),
+        // 与下面绑定的 {queue}.dead 队列 routing-key 对应,无需在 policy 里配 routing-key。
+        private const string SharedDlx = "bpm.wait-exec.dlx";
 
         private readonly Logger _logger;
         private readonly IMessageHandler _handler;
@@ -59,7 +65,18 @@ namespace RabbitMQService
         public void Start()
         {
             InitializeConnection();
-            StartListening();
+            try
+            {
+                // 开机只做一次快速尝试(单次 TCP 超时 10 秒),避免 SCM 30 秒启动超时(1053)。
+                // 瞬时网络故障转后台重连后立即返回;配置类错误(认证/队列为空)仍直接抛,快速失败。
+                Connect(maxAttempts: 1);
+                StartListening();
+            }
+            catch (Exception ex) when (IsTransient(ex))
+            {
+                _logger.Warn(ex, "启动时连接 RabbitMQ 失败,已转入后台重连,服务先行启动...");
+                Task.Run(() => ReconnectLoopAsync());
+            }
         }
 
         private void InitializeConnection()
@@ -75,13 +92,29 @@ namespace RabbitMQService
                 AutomaticRecoveryEnabled = false,
                 TopologyRecoveryEnabled = false,
                 RequestedHeartbeat = TimeSpan.FromSeconds(30),
-                NetworkRecoveryInterval = TimeSpan.FromSeconds(5)
+                NetworkRecoveryInterval = TimeSpan.FromSeconds(5),
+                // 单次 TCP 建连超时 10 秒,避免开机/重连时一次尝试就卡住几十秒
+                RequestedConnectionTimeout = TimeSpan.FromSeconds(10)
             };
 
             Connect();
         }
 
+        private static bool IsTransient(Exception ex)
+        {
+            return ex is BrokerUnreachableException
+                || ex is System.Net.Sockets.SocketException
+                || ex is System.IO.IOException
+                || ex is TimeoutException
+                || (ex is InvalidOperationException && ex.Message.Contains("连接不可用"));
+        }
+
         private void Connect()
+        {
+            Connect(maxAttempts: 5);
+        }
+
+        private void Connect(int maxAttempts)
         {
             int retry = 0;
             while (true)
@@ -97,11 +130,11 @@ namespace RabbitMQService
                     _logger.Info("成功连接 RabbitMQ");
                     return;
                 }
-                catch (Exception ex) when (ex is BrokerUnreachableException || ex is System.Net.Sockets.SocketException || ex is System.IO.IOException)
+                catch (Exception ex) when (IsTransient(ex))
                 {
                     retry++;
-                    // FIX#4: 初始连接指数退避,最多 5 次后抛给 Start 调用方(由 Topshelf 决定重启),不再吞掉
-                    if (retry >= 5)
+                    // 达到上限后抛给调用方:开机走后台重连,重连循环里被捕获后继续退避
+                    if (retry >= maxAttempts)
                         throw new Exception($"无法连接 RabbitMQ({_hostName}:{_port}),已重试{retry}次", ex);
                     int delay = Math.Min(retry * 2000, 15000);
                     _logger.Error(ex, $"连接失败,第{retry}次重试,延迟{delay}ms");
@@ -233,19 +266,21 @@ namespace RabbitMQService
 
         private void DeclareQueueWithDeadLetter(IModel channel, string queueName)
         {
-            string dlx = queueName + ".dlx";
+            // 共享 DLX + 每队列一个死信队列(routig-key=队列名)。Exchange/QueueDeclare 幂等,多队列重复声明无害。
             string dlq = queueName + ".dead";
-            channel.ExchangeDeclare(dlx, ExchangeType.Direct, true);
+            channel.ExchangeDeclare(SharedDlx, ExchangeType.Direct, true);
             channel.QueueDeclare(dlq, true, false, false);
-            channel.QueueBind(dlq, dlx, queueName);
+            channel.QueueBind(dlq, SharedDlx, queueName);
 
             var args = new Dictionary<string, object>
             {
-                { "x-dead-letter-exchange", dlx },
+                { "x-dead-letter-exchange", SharedDlx },
                 { "x-dead-letter-routing-key", queueName }
             };
             // 注意:若线上队列已存在且无 DLX 参数,此次声明会抛 406 且当前 channel 会被
             // broker 关闭,调用方捕获后会用新通道重试为“仅消费不声明”模式。
+            // 根治:在 MQ 服务器上 set_policy 补 dead-letter-exchange(见 SharedDlx 注释),policy
+            // 与此处参数等价,不冲突;policy 生效后重启服务即恢复完整死信链路。
             channel.QueueDeclare(queueName, true, false, false, args);
         }
 
@@ -269,7 +304,7 @@ namespace RabbitMQService
             };
             consumer.Received += (model, ea) => HandleMessageAsync(queueName, consumer, ea);
 
-            _logger.Warn($"队列[{queueName}] 已存在且参数冲突(可能缺死信配置),已降级为仅消费模式;请人工补配 DLX={queueName}.dlx。超限毒消息将直接丢弃。");
+            _logger.Warn($"队列[{queueName}] 已存在且参数冲突,已降级为仅消费模式;请在 MQ 服务器执行 rabbitmqctl set_policy bpm-wait-exec-dlx \".*\" '{{\"dead-letter-exchange\":\"bpm.wait-exec.dlx\"}}' --apply-to queues, 然后重启服务。超限毒消息暂直接丢弃。");
         }
 
         private async Task HandleMessageAsync(string queueName, AsyncEventingBasicConsumer consumer, BasicDeliverEventArgs ea)

@@ -25,8 +25,11 @@ namespace RabbitMQService
             }
             _logger.Info($"SqlServer_Config: {MaskConnectionString(config)}");
 
-            // 并发数由 DB 配置列驱动,非法值回落到 5,避免写死的 5 导致改配置无效
-            const string sql = @"SELECT QueueName, ISNULL(MaxConcurrent, 5) AS MaxConcurrent
+            // Tb_BPM_QueueSet 现网只有 QueueName 列(无 MaxConcurrent),先只查队列名,并发数默认 5;
+            // 若以后表加了 MaxConcurrent 列,自动按列值驱动(1~64 钳位),无需改代码
+            const string sqlWithConcurrent = @"SELECT QueueName, ISNULL(MaxConcurrent, 5) AS MaxConcurrent
+                                 FROM dbo.Tb_BPM_QueueSet";
+            const string sqlQueueOnly = @"SELECT QueueName, 5 AS MaxConcurrent
                                  FROM dbo.Tb_BPM_QueueSet";
 
             try
@@ -34,7 +37,17 @@ namespace RabbitMQService
                 using (var conn = new SqlConnection(config))
                 {
                     conn.Open();
-                    var list = conn.Query<QueueConfig>(sql).ToList();
+                    List<QueueConfig> list;
+                    try
+                    {
+                        list = conn.Query<QueueConfig>(sqlWithConcurrent).ToList();
+                    }
+                    catch (SqlException ex) when (ex.Number == 207)
+                    {
+                        // 207 = 列名无效(老表无 MaxConcurrent 列),降级为只查队列名
+                        _logger.Warn("Tb_BPM_QueueSet 无 MaxConcurrent 列,并发数统一默认 5");
+                        list = conn.Query<QueueConfig>(sqlQueueOnly).ToList();
+                    }
 
                     return list
                         .Where(q => !string.IsNullOrWhiteSpace(q.QueueName))
