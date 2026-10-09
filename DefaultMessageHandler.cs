@@ -43,23 +43,19 @@ internal class DefaultMessageHandler : IMessageHandler
             return;
         }
 
-        // 幂等写入:MQ 红eliver/超时重试会导致同一 InstanceId 重复投递,
-        // 以 task_id 去重,重复投递视为成功(直接 Ack),避免下游 BPM 重复执行。
-        // 前提:tb_task_bpm_wait_exec.task_id 需有唯一约束/唯一索引:
-        //   CREATE UNIQUE INDEX UX_tb_task_bpm_wait_exec_task_id ON tb_task_bpm_wait_exec(task_id);
+        // 业务要求:每次投递都必须插入一行。同一个 InstanceId 在其生命周期内会产生
+        // 多条状态事件(办结/驳回/待办等),task_id 非唯一,禁止按 task_id 去重。
+        // 毒消息防护不在 DB 层做,由 RabbitMQConsumer 的有限重试(5 次后进死信)兜底。
         const string sql = @"
-                IF NOT EXISTS (SELECT 1 FROM [tb_task_bpm_wait_exec] WHERE [task_id] = @InstanceId)
-                BEGIN
-                    INSERT INTO [tb_task_bpm_wait_exec]
-                    (
-                        task_name,
-                        task_id,
-                        task_result,
-                        task_is_complete
-                    )
-                    VALUES
-                    (@QueueName, @InstanceId, @BpmType, @TaskIsComplete)
-                END
+                INSERT INTO [tb_task_bpm_wait_exec]
+                (
+                    task_name,
+                    task_id,
+                    task_result,
+                    task_is_complete
+                )
+                VALUES
+                (@QueueName, @InstanceId, @BpmType, @TaskIsComplete)
         ";
 
         try
@@ -74,21 +70,13 @@ internal class DefaultMessageHandler : IMessageHandler
                     BpmType = modelMessage.BpmType,
                     TaskIsComplete = 0
                 });
-                if (rows == 0)
-                    _logger.Info($"消息重复投递已去重: InstanceId={modelMessage.InstanceId}, 队列={queueName}");
-                else
-                    _logger.Info($"消息入库成功: InstanceId={modelMessage.InstanceId}, 队列={queueName}");
+                _logger.Info($"消息入库成功: InstanceId={modelMessage.InstanceId}, 队列={queueName}, 影响行数={rows}");
             }
         }
         catch (OperationCanceledException)
         {
             _logger.Warn($"消息处理被取消: InstanceId={modelMessage.InstanceId}, 队列={queueName}");
             throw;
-        }
-        catch (SqlException ex) when (ex.Number == 2627 || ex.Number == 2601)
-        {
-            // 唯一索引兜底:高并发下 IF NOT EXISTS 仍可能撞唯一键,视为重复投递成功,保证 Ack 不进死循环
-            _logger.Info($"消息重复投递已去重(唯一键冲突): InstanceId={modelMessage.InstanceId}, 队列={queueName}");
         }
         catch (Exception ex)
         {
